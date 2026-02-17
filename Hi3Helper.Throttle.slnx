@@ -1,0 +1,11 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="Hi3Helper.Throttle/Hi3Helper.Throttle.csproj" Id="06b85e81-6654-4da6-bfd1-7458e00092ea">
+    <Platform Project="x64" />
+  </Project>
+  <Project Path="Test/Test.csproj">
+    <Platform Project="x64" />
+  </Project>
+</Solution>
