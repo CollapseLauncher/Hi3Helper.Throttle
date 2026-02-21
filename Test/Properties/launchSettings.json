@@ -1,0 +1,9 @@
+{
+  "profiles": {
+    "Test": {
+      "commandName": "Project",
+      "commandLineArgs": "\"https://cdn.collapselauncher.com/cl-delta/hi3-830-840/Hi3JP_8.3.0_8.4.0_lzma2_crc32_4CA866D6AC943B08BA632B9392B877B6.patch\"",
+      "nativeDebugging": true
+    }
+  }
+}

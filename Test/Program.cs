@@ -2,6 +2,7 @@
 using System.Buffers;
 using System.IO;
 using System.Net.Http;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,8 +12,8 @@ using Microsoft.Win32.SafeHandles;
 
 namespace Test;
 
-[StructLayout(LayoutKind.Sequential)]
-public struct ThrottleService
+[StructLayout(LayoutKind.Sequential, Pack = 8)]
+public struct ThrottleServiceContext
 {
     private long _availableTokens;
     private long _lastTimestamp;
@@ -21,23 +22,23 @@ public struct ThrottleService
 public static partial class ThrottleHelper
 {
     [LibraryImport("Hi3Helper.Throttle.dll", EntryPoint = "ThrottleServiceSetSharedThrottleBytes")]
-    internal static partial void SetSharedThrottleBytes(int bytesPerSecond, in int burstBytes);
+    internal static partial int SetSharedThrottleBytes(long bytesPerSecond, in long burstBytes);
 
     [LibraryImport("Hi3Helper.Throttle.dll", EntryPoint = "ThrottleServiceAddBytesOrWaitAsync")]
     [return: MarshalAs(UnmanagedType.Error)]
     private static partial int ThisThrottleServiceAddBytesOrWaitAsync(
-        in ThrottleService service,
-        long               readBytes,
-        nint               tokenHandle,
-        out nint           asyncWaitHandle);
+        in ThrottleServiceContext service,
+        long                      readBytes,
+        nint                      tokenHandle,
+        out nint                  asyncWaitHandle);
 
     [LibraryImport("kernel32.dll", EntryPoint = "CloseHandle", SetLastError = true)]
     private static partial int CloseHandle(nint hObject);
 
-    public static Task AddBytesOrWaitAsync(
-        this ref ThrottleService service,
-        long                     readBytes,
-        CancellationToken        token = default)
+    public static ValueTask AddBytesOrWaitAsync(
+        this ref ThrottleServiceContext service,
+        long                            readBytes,
+        CancellationToken               token = default)
     {
         nint tokenHandle = token.WaitHandle.SafeWaitHandle.DangerousGetHandle();
         int hr = ThisThrottleServiceAddBytesOrWaitAsync(in service,
@@ -53,19 +54,16 @@ public static partial class ThrottleHelper
             SafeWaitHandle = safeHandle
         };
 
-        TaskCompletionSource tcs = new();
+        AsyncValueTaskMethodBuilder valueTaskCs = new();
+        ThreadPool.UnsafeRegisterWaitForSingleObject(waitHandle,
+                                                     DisposeWaitHandleCallback,
+                                                     null,
+                                                     -1,
+                                                     true);
 
-        RegisteredWaitHandle? registeredWaitHandle = null;
-        registeredWaitHandle =
-            ThreadPool.RegisterWaitForSingleObject(waitHandle,
-                                                   Impl,
-                                                   null,
-                                                   -1,
-                                                   true);
-
-        return tcs.Task;
-
-        void Impl(object? state, bool isTimedOut)
+        return valueTaskCs.Task;
+        
+        void DisposeWaitHandleCallback(object? state, bool isTimedOut)
         {
             safeHandle.Dispose();
             waitHandle.Dispose();
@@ -75,21 +73,19 @@ public static partial class ThrottleHelper
                 _ = CloseHandle(asyncWaitHandle);
             }
 
-            // ReSharper disable once AccessToModifiedClosure
-            registeredWaitHandle!.Unregister(null);
-            tcs.SetResult();
+            valueTaskCs.SetResult();
         }
     }
 }
 
 public class Program
 {
-    private static ThrottleService ThrottleService;
+    private static ThrottleServiceContext _throttleContext;
 
     static Program()
     {
-        ThrottleService = new ThrottleService();
-        ThrottleHelper.SetSharedThrottleBytes(10 << 20, 10 << 20);
+        _throttleContext = default;
+        ThrottleHelper.SetSharedThrottleBytes(2 << 20, 4 << 20);
     }
 
     public static async Task Main(params string[] args)
@@ -99,8 +95,28 @@ public class Program
             return;
         }
 
+        new Thread(ReadChangeSettings)
+        {
+            IsBackground = true
+        }.Start();
+
         using HttpClient client = new();
         await DummyRead(client, args[0]);
+    }
+
+    private static void ReadChangeSettings()
+    {
+        while (true)
+        {
+            if (Console.ReadLine() is not { } line ||
+                !double.TryParse(line, null, out double result)) continue;
+
+            result *= 1 << 20;
+            long resultAbs      = (long)Math.Abs(result);
+            long resultAbsBurst = resultAbs * 2;
+            ThrottleHelper.SetSharedThrottleBytes(resultAbs, resultAbsBurst);
+        }
+        // ReSharper disable once FunctionNeverReturns
     }
 
     private static async Task DummyRead(HttpClient client, string url)
@@ -112,18 +128,26 @@ public class Program
 
             Console.WriteLine($"Download for: {url} will be started...");
 
-            byte[]       buffer    = ArrayPool<byte>.Shared.Rent(8 << 10);
+            byte[]       buffer    = ArrayPool<byte>.Shared.Rent(32 << 10);
             Memory<byte> bufferMem = buffer;
-            int          read;
-            while ((read = await remoteStream.ReadAsync(bufferMem)) > 0)
+
+            try
             {
-                await ThrottleService.AddBytesOrWaitAsync(read);
-                await nullStream.WriteAsync(bufferMem[..read]);
+                int read;
+                while ((read = await remoteStream.ReadAsync(bufferMem)) > 0)
+                {
+                    double speed    = Ext.CalculateSpeed(read);
+                    string speedStr = Ext.SummarizeSizeSimple(speed, 1);
 
-                double speed    = Ext.CalculateSpeed(read);
-                string speedStr = Ext.SummarizeSizeSimple(speed, 1);
+                    Console.Write($"\r{read} bytes read | Downloading {speedStr}/s");
 
-                Console.Write($"\rDownloading {speedStr}/s");
+                    await _throttleContext.AddBytesOrWaitAsync(read);
+                    nullStream.Write(buffer.AsSpan(0, read));
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
             }
         }
     }
