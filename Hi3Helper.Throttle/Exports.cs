@@ -1,9 +1,12 @@
 ﻿#if CompileNative
 
+using System;
 using Microsoft.Win32.SafeHandles;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
+
 // ReSharper disable CommentTypo
 #pragma warning disable CA1401
 #pragma warning disable SYSLIB1054
@@ -23,53 +26,93 @@ public static class Exports
         ThrottleServiceContext.SetSharedThrottleBytes(bytesPerSecond, burstBytes == null ? null : *burstBytes);
 
     /// <summary>
+    /// Gets current shared throttle bytes per second and burst bytes.
+    /// </summary>
+    /// <param name="bytesPerSecond">Amount of bytes per second target being throttled.</param>
+    /// <param name="burstBytes">Amount of bytes burst allowed once throttle is over.</param>
+    [UnmanagedCallersOnly(EntryPoint = "ThrottleServiceGetSharedThrottleBytes", CallConvs = [typeof(CallConvCdecl)])]
+    public static unsafe void ThrottleServiceGetSharedThrottleBytes(long* bytesPerSecond, long* burstBytes)
+    {
+        if (bytesPerSecond != null)
+        {
+            *bytesPerSecond = ThrottleServiceContext.SharedBytesPerSecond;
+        }
+
+        if (burstBytes != null)
+        {
+            *burstBytes = ThrottleServiceContext.Capacity;
+        }
+    }
+
+    /// <summary>
     /// Adds the current read bytes and wait if the total exceeds the throttle limit from a given <see cref="ThrottleServiceContext"/> struct.
     /// </summary>
     /// <param name="context">A struct of the current throttle state.</param>
     /// <param name="readBytes">Amount of current read bytes to be added.</param>
-    /// <param name="tokenHandle">Cancellation token to cancel the waiting throttle task.</param>
+    /// <param name="cancelTokenHandle">Cancellation token to cancel the waiting throttle task.</param>
     /// <param name="asyncWaitHandle">Handle of the asynchronous event.</param>
     [UnmanagedCallersOnly(EntryPoint = "ThrottleServiceAddBytesOrWaitAsync", CallConvs = [typeof(CallConvCdecl)])]
     public static unsafe int ThrottleServiceAddBytesOrWaitAsync(
         ThrottleServiceContext* context,
         long                    readBytes,
-        nint                    tokenHandle,
-        void**                  asyncWaitHandle)
+        nint                    cancelTokenHandle,
+        nint*                   asyncWaitHandle)
     {
-        if (context == null)
+        if (context == null) return unchecked((int)0x80004003);
+
+        CancellationTokenSource cts = new();
+        if (cancelTokenHandle != nint.Zero)
         {
-            return unchecked((int)0x80004003); // E_POINTER
+            SafeWaitHandle cancelTokenSafeWaitHandle = new(cancelTokenHandle, false);
+            EventWaitHandle cancelTokenWaitHandle = new(false, EventResetMode.ManualReset)
+            {
+                SafeWaitHandle = cancelTokenSafeWaitHandle
+            };
+
+            ThreadPool.RegisterWaitForSingleObject(cancelTokenWaitHandle,
+                OnWaitSingleCompleted,
+                cts,
+                -1,
+                true);
         }
 
-        CancellationToken token           = CancellationToken.None;
-        SafeWaitHandle?   tokenWaitHandle = null;
-        if (tokenHandle != nint.Zero)
-        {
-            tokenWaitHandle                 = new SafeWaitHandle(tokenHandle, ownsHandle: false);
-            token.WaitHandle.SafeWaitHandle = tokenWaitHandle;
-        }
-
-        nint waitHandle = PInvoke.CreateEvent(nint.Zero, 1, 0, nint.Zero);
-        *asyncWaitHandle = (void*)waitHandle;
-
-        RunAsync((nint)context, readBytes, waitHandle, tokenWaitHandle, token);
-        return 0; // S_OK
+        nint completionEvent = PInvoke.CreateEvent(nint.Zero, 1, 0, nint.Zero);
+        *asyncWaitHandle = completionEvent;
+        RunAsync((nint)context, readBytes, completionEvent, cts.Token);
+        return 0;
     }
 
-    private static async void RunAsync(nint context, long readBytes, nint waitHandle, SafeWaitHandle? tokenWaitHandle, CancellationToken token)
+    private static void OnWaitSingleCompleted(object? state, bool isTimedOut)
+    {
+        ((CancellationTokenSource)state!).Cancel();
+    }
+
+    private static async void RunAsync(
+        nint              context,
+        long              readBytes,
+        nint              completionEvent,
+        CancellationToken token)
     {
         try
         {
-            await ThrottleServiceContext.AddBytesOrWaitAsyncCore(context, readBytes, token);
+            await ThrottleServiceContext
+                .AddBytesOrWaitAsyncCore(context, readBytes, token)
+                .ConfigureAwait(false);
         }
         catch
         {
-            // ignore
+            // ignored
         }
         finally
         {
-            _ = PInvoke.SetEvent(waitHandle);
-            tokenWaitHandle?.Dispose();
+            try
+            {
+                _ = PInvoke.SetEvent(completionEvent);
+            }
+            catch
+            {
+                // ignored
+            }
         }
     }
 }
