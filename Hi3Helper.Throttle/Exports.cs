@@ -1,11 +1,9 @@
-﻿#if CompileNative
+﻿#if CompileNative && WIN32
 
-using System;
 using Microsoft.Win32.SafeHandles;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
-using System.Threading.Tasks;
 
 // ReSharper disable CommentTypo
 #pragma warning disable CA1401
@@ -14,8 +12,13 @@ using System.Threading.Tasks;
 
 namespace Hi3Helper.Throttle;
 
-public static class Exports
+internal static class Exports
 {
+#if UseDllMainWorkaround
+    [UnmanagedCallersOnly(EntryPoint = "DllProcessAttach")]
+    private static void DllProcessAttach(nint hModule) { }
+#endif
+
     /// <summary>
     /// Set how many bytes to be throttled per second. Set to 0 to disable throttling.
     /// </summary>

@@ -1,4 +1,5 @@
-﻿using System.ComponentModel;
+﻿#if WIN32
+using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -119,3 +120,4 @@ internal class Win32NativeDelay :
             _selfHandle.Free();
     }
 }
+#endif
